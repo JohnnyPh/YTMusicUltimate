@@ -5,21 +5,29 @@ on:
     inputs: 
       ipa_url:
         description: "URL to the decrypted IPA file"
-        default: ""
+        default: "https://www.dropbox.com/scl/fi/01s5v0815hhu6afeilrww/com.google.ios.youtubemusic_8.24_und3fined.ipa?rlkey=6efo0dx54hm9uzmciumbejidv&st=y75x7icb&dl=1"
         required: true
         type: string
-
       display_name:
         description: "App Name (Optional)"
         default: "YouTube Music"
         required: true
         type: string
-
       bundle_id:
         description: "BundleID (Optional)"
         default: "com.google.ios.youtubemusic"
         required: true
         type: string
+      upload_to_appdb:
+        description: "Upload and Edit Metadata on appdb"
+        default: true
+        required: false
+        type: boolean
+      cleanup_old_versions:
+        description: "Delete older versions of this app from appdb"
+        default: true
+        required: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout Main
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
         with:
           path: main
           submodules: recursive
@@ -46,21 +54,20 @@ jobs:
         run: |
           curl -L -r 0-1023 -o sample.part "${{ inputs.ipa_url }}" > /dev/null 2>&1
           file_type=$(file --mime-type -b sample.part)
-
           if [[ "$file_type" != "application/x-ios-app" && "$file_type" != "application/zip" ]]; then
             echo "::error::Validation failed: The file is not a valid IPA file. Detected type: $file_type."
             exit 1
           fi
 
       - name: Install Dependencies
-        run: brew install make ldid
+        run: brew install make ldid jq
 
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Cache Theos
         id: theos
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v4
         env:
           cache-name: theos_cache_67db2ab
         with:
@@ -70,7 +77,7 @@ jobs:
 
       - name: Setup Theos
         if: steps.theos.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v4
         with:
           repository: theos/theos
           ref: 67db2ab8d950910161730de77c322658ea3e6b44
@@ -91,32 +98,127 @@ jobs:
       - name: Install cyan
         run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
 
-      - name: Download YouTube Music
-        id: download_youtube_music
+      - name: Download YouTube Music IPA
         run: wget "${{ inputs.ipa_url }}" --no-verbose -O ${{ github.workspace }}/main/ytm.ipa
 
       - name: Build Tweak for Sideloading
-        id: build_package
         run: |
           cd ${{ github.workspace }}/main
           make clean package SIDELOADING=1
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Inject tweak into provided IPA
+      - name: Get Versions and Prepare Package
+        id: package_info
+        run: |
+          YTM_VERSION=$(echo "${{ inputs.ipa_url }}" | grep -o -E '[0-9]+(\.[0-9]+)+' | head -n 1)
+          TWEAK_VERSION="v${{ github.run_number }}" # Using run number as version
+          FINAL_IPA_NAME="YTMusicUltimate_${TWEAK_VERSION}.ipa"
+          
+          echo "YTM_VERSION=${YTM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TWEAK_VERSION=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "package_name=${FINAL_IPA_NAME}" >> "$GITHUB_OUTPUT"
+          echo "job_id=$(echo -n "${{ github.run_id }}-${{ github.run_attempt }}" | shasum -a 1 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Inject tweak and Rename
         run: |
           cd ${{ github.workspace }}/main/packages
-          tweakName=$(ls)
+          tweakName=$(ls -t *.deb | head -n1)
           cd ${{ github.workspace }}/main
-          cyan -i ytm.ipa -o packages/YTMusicUltimate.ipa -uwsf packages/$tweakName -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
+          cyan -i ytm.ipa -o "packages/${{ steps.package_info.outputs.package_name }}" -uwsf "packages/$tweakName" -n "${{ inputs.display_name }}" -b "${{ inputs.bundle_id }}"
 
-      - name: Create Release
+      - name: Upload and Edit on appdb
+        if: ${{ inputs.upload_to_appdb }}
+        id: upload_step
+        env:
+          APPDB_LINK_TOKEN: ${{ secrets.APPDB_LINK_TOKEN }}
+          PACKAGE_PATH: ${{ github.workspace }}/main/packages/${{ steps.package_info.outputs.package_name }}
+          JOB_ID: ${{ steps.package_info.outputs.job_id }}
+          TWEAK_VERSION: ${{ steps.package_info.outputs.TWEAK_VERSION }}
+          YTM_VERSION: ${{ steps.package_info.outputs.YTM_VERSION }}
+        run: |
+          echo "Step 1: Uploading IPA to appdb..."
+          curl -sS -X POST https://api.dbservices.to/v1.7/add_ipa/ \
+               -F "lt=${APPDB_LINK_TOKEN}" \
+               -F "job_id=${JOB_ID}" \
+               -F "ipa=@${PACKAGE_PATH}" \
+               --fail
+
+          echo "Step 2: Waiting for IPA processing..."
+          for i in {1..20}; do
+            sleep 15
+            STATUS_RESPONSE=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipa_analyze_jobs/ -F "lt=${APPDB_LINK_TOKEN}" -F "ids[]=${JOB_ID}")
+            IS_FINISHED=$(echo "$STATUS_RESPONSE" | jq -r '.data[0].is_finished')
+            if [ "$IS_FINISHED" = "1" ]; then
+              echo "Processing finished!"
+              break
+            fi
+            echo "Still processing... Attempt $i of 20."
+            if [ "$i" = "20" ]; then
+              echo "Error: Timeout waiting for IPA processing."
+              exit 1
+            fi
+          done
+          
+          echo "Step 3: Fetching the new IPA ID..."
+          IPA_ID=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipas/ -F "lt=${APPDB_LINK_TOKEN}" | jq '(.data | sort_by(.id) | reverse)[0].id')
+          if [ -z "$IPA_ID" ] || [ "$IPA_ID" = "null" ]; then
+            echo "Error: Could not fetch new IPA ID."
+            exit 1
+          fi
+          echo "Found newest IPA ID: ${IPA_ID}"
+          echo "ipa_id=${IPA_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "Step 4: Editing IPA metadata..."
+          APP_NAME="YouTube Music v${YTM_VERSION} + Ultimate ${TWEAK_VERSION} | Google LLC"
+          curl -sS -X POST https://api.dbservices.to/v1.7/edit_ipa_metadata/ \
+            -F "lt=${APPDB_LINK_TOKEN}" \
+            -F "id=${IPA_ID}" \
+            -F "name=${APP_NAME}" \
+            -F "use_default_tos=1" \
+            -F "use_default_privacy_policy=1" \
+            -F "use_default_license=1" \
+            -F "is_18plus=0" \
+            -F "description=Enhanced YouTube Music with YTMusicUltimate injected" \
+            -F "whatsnew=The latest version contains bug fixes and performance improvements." \
+            -F "is_public=1" \
+            -F "source_name=Johnny's library" \
+            -F "developer_name=Google LLC" \
+            -F "genre_name=Enhanced Apps" \
+            -F "min_ios_version=15.0" \
+            -F "min_ipados_version=15.0" \
+            --fail
+          echo "Metadata updated successfully!"
+
+      - name: Cleanup Old Versions
+        if: ${{ inputs.upload_to_appdb && inputs.cleanup_old_versions }}
+        env:
+          APPDB_LINK_TOKEN: ${{ secrets.APPDB_LINK_TOKEN }}
+          NEWEST_IPA_ID: ${{ steps.upload_step.outputs.ipa_id }}
+        run: |
+          echo "Step 5: Cleaning up old IPA versions, keeping ID ${NEWEST_IPA_ID}..."
+          IPAS_RESPONSE=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipas/ -F "lt=${APPDB_LINK_TOKEN}")
+          OLD_IPA_IDS=$(echo "$IPAS_RESPONSE" | jq -r --argjson newest_id "$NEWEST_IPA_ID" '(.data | map(select(.name | contains("YouTube Music"))) | map(select(.id != $newest_id)) | .[].id)')
+          if [ -z "$OLD_IPA_IDS" ]; then
+            echo "No old YouTube Music versions found to delete."
+          else
+            echo "Found old IPAs to delete with IDs: $OLD_IPA_IDS"
+            for OLD_ID in $OLD_IPA_IDS; do
+              echo "Deleting IPA with ID: $OLD_ID..."
+              curl -sS -X POST https://api.dbservices.to/v1.7/delete_ipa/ \
+                -F "lt=${APPDB_LINK_TOKEN}" \
+                -F "id=${OLD_ID}" \
+                --fail
+              echo "Deleted IPA with ID: $OLD_ID"
+              sleep 2
+            done
+          fi
+          echo "Cleanup finished."
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.0.6
         with:
-          name: YTMusicUltimate-v${{ github.run_number }}
-          files: main/packages/*.ipa
+          name: YTMusicUltimate-${{ steps.package_info.outputs.TWEAK_VERSION }}
+          tag_name: ytm-ultimate-${{ steps.package_info.outputs.TWEAK_VERSION }}
+          files: main/packages/${{ steps.package_info.outputs.package_name }}
           draft: true
-
-      - name: Output Release URL
-        run: |
-          echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases"
