@@ -5,7 +5,7 @@ on:
     inputs: 
       ipa_url:
         description: "URL to the decrypted IPA file"
-        default: "https://www.dropbox.com/scl/fi/01s5v0815hhu6afeilrww/com.google.ios.youtubemusic_8.24_und3fined.ipa?rlkey=6efo0dx54hm9uzmciumbejidv&st=y75x7icb&dl=1"
+        default: ""
         required: true
         type: string
       display_name:
@@ -108,17 +108,33 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Get Versions and Prepare Package
+      - name: Get Release Info and Prepare Package
         id: package_info
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          YTM_VERSION=$(echo "${{ inputs.ipa_url }}" | grep -o -E '[0-9]+(\.[0-9]+)+' | head -n 1)
-          TWEAK_VERSION="v${{ github.run_number }}" # Using run number as version
-          FINAL_IPA_NAME="YTMusicUltimate_${TWEAK_VERSION}.ipa"
+          API_URL="https://api.github.com/repos/dayanch96/YTMusicUltimate/releases/latest"
+          RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$API_URL")
           
+          TWEAK_TAG=$(echo "$RESPONSE" | jq -r '.tag_name')
+          RELEASE_NAME=$(echo "$RESPONSE" | jq -r '.name')
+          # Lấy và lọc bỏ các dòng "Fixed..." không cần thiết khỏi mô tả
+          RELEASE_BODY=$(echo "$RESPONSE" | jq -r '.body | gsub("\r"; "")' | grep -vE '^\s*Fixed.*\(#.*\)\s*$')
+
+          if [ -z "$TWEAK_TAG" ] || [ "$TWEAK_TAG" = "null" ]; then
+            echo "::error::Could not fetch tweak tag name."
+            exit 1
+          fi
+          YTM_VERSION=$(echo "${{ inputs.ipa_url }}" | grep -o -E '[0-9]+(\.[0-9]+)+' | head -n 1)
+          FINAL_IPA_NAME="YTMusicUltimate_${TWEAK_TAG}.ipa"
           echo "YTM_VERSION=${YTM_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "TWEAK_VERSION=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TWEAK_TAG=${TWEAK_TAG}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_NAME=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
           echo "package_name=${FINAL_IPA_NAME}" >> "$GITHUB_OUTPUT"
           echo "job_id=$(echo -n "${{ github.run_id }}-${{ github.run_attempt }}" | shasum -a 1 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "release_body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$RELEASE_BODY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Inject tweak and Rename
         run: |
@@ -134,8 +150,9 @@ jobs:
           APPDB_LINK_TOKEN: ${{ secrets.APPDB_LINK_TOKEN }}
           PACKAGE_PATH: ${{ github.workspace }}/main/packages/${{ steps.package_info.outputs.package_name }}
           JOB_ID: ${{ steps.package_info.outputs.job_id }}
-          TWEAK_VERSION: ${{ steps.package_info.outputs.TWEAK_VERSION }}
+          RELEASE_NAME: ${{ steps.package_info.outputs.RELEASE_NAME }}
           YTM_VERSION: ${{ steps.package_info.outputs.YTM_VERSION }}
+          RELEASE_BODY: ${{ steps.package_info.outputs.release_body }}
         run: |
           echo "Step 1: Uploading IPA to appdb..."
           curl -sS -X POST https://api.dbservices.to/v1.7/add_ipa/ \
@@ -170,7 +187,7 @@ jobs:
           echo "ipa_id=${IPA_ID}" >> "$GITHUB_OUTPUT"
 
           echo "Step 4: Editing IPA metadata..."
-          APP_NAME="YouTube Music v${YTM_VERSION} + Ultimate ${TWEAK_VERSION} | Google LLC"
+          APP_NAME="YouTube Music v${YTM_VERSION} + ${RELEASE_NAME} | Google LLC"
           curl -sS -X POST https://api.dbservices.to/v1.7/edit_ipa_metadata/ \
             -F "lt=${APPDB_LINK_TOKEN}" \
             -F "id=${IPA_ID}" \
@@ -180,7 +197,7 @@ jobs:
             -F "use_default_license=1" \
             -F "is_18plus=0" \
             -F "description=Enhanced YouTube Music with YTMusicUltimate injected" \
-            -F "whatsnew=The latest version contains bug fixes and performance improvements." \
+            -F "whatsnew=${RELEASE_BODY}" \
             -F "is_public=1" \
             -F "source_name=Johnny's library" \
             -F "developer_name=Google LLC" \
@@ -218,7 +235,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.0.6
         with:
-          name: YTMusicUltimate-${{ steps.package_info.outputs.TWEAK_VERSION }}
-          tag_name: ytm-ultimate-${{ steps.package_info.outputs.TWEAK_VERSION }}
+          name: ${{ steps.package_info.outputs.RELEASE_NAME }}
+          tag_name: ytm-ultimate-${{ steps.package_info.outputs.TWEAK_TAG }}
+          body: ${{ steps.package_info.outputs.release_body }}
           files: main/packages/${{ steps.package_info.outputs.package_name }}
           draft: true
