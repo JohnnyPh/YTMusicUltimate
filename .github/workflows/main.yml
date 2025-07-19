@@ -5,7 +5,7 @@ on:
     inputs:
       ipa_url:
         description: "URL to the decrypted IPA file"
-        default: "https://www.dropbox.com/scl/fi/01s5v0815hhu6afeilrww/com.google.ios.youtubemusic_8.24_und3fined.ipa?rlkey=6efo0dx54hm9uzmciumbejidv&st=y75x7icb&dl=1"
+        default: "https://www.dropbox.com/scl/fi/2iroyl4kso2f9k46ql6tx/com.google.ios.youtubemusic_8.26_und3fined.ipa?rlkey=eg8z8vjfuubv2qipsvlixsvxt&st=t614sy02&dl=1"
         required: true
         type: string
       display_name:
