@@ -5,7 +5,7 @@ on:
     inputs:
       ipa_url:
         description: "URL to the decrypted IPA file"
-        default: "https://www.dropbox.com/scl/fi/2iroyl4kso2f9k46ql6tx/com.google.ios.youtubemusic_8.26_und3fined.ipa?rlkey=eg8z8vjfuubv2qipsvlixsvxt&st=z3moojnr&dl=1"
+        default: "https://www.dropbox.com/scl/fi/01s5v0815hhu6afeilrww/com.google.ios.youtubemusic_8.24_und3fined.ipa?rlkey=6efo0dx54hm9uzmciumbejidv&st=y75x7icb&dl=1"
         required: true
         type: string
       display_name:
@@ -39,7 +39,6 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
-      actions: write
 
     steps:
       - name: Checkout Main
@@ -119,7 +118,6 @@ jobs:
           
           TWEAK_TAG=$(echo "$RESPONSE" | jq -r '.tag_name')
           RELEASE_NAME=$(echo "$RESPONSE" | jq -r '.name')
-          # Lấy và lọc bỏ các dòng "Fixed..." không cần thiết khỏi mô tả
           RELEASE_BODY=$(echo "$RESPONSE" | jq -r '.body | gsub("\r"; "")' | grep -vE '^\s*Fixed.*\(#.*\)\s*$')
 
           if [ -z "$TWEAK_TAG" ] || [ "$TWEAK_TAG" = "null" ]; then
@@ -143,12 +141,6 @@ jobs:
           tweakName=$(ls -t *.deb | head -n1)
           cd ${{ github.workspace }}/main
           cyan -i ytm.ipa -o "packages/${{ steps.package_info.outputs.package_name }}" -uwsf "packages/$tweakName" -n "${{ inputs.display_name }}" -b "${{ inputs.bundle_id }}"
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package_info.outputs.package_name }}
-          path: ${{ github.workspace }}/main/packages/${{ steps.package_info.outputs.package_name }}
 
       - name: Upload and Edit on appdb
         if: ${{ inputs.upload_to_appdb }}
@@ -246,4 +238,4 @@ jobs:
           tag_name: ytm-ultimate-${{ steps.package_info.outputs.TWEAK_TAG }}
           body: ${{ steps.package_info.outputs.release_body }}
           files: main/packages/${{ steps.package_info.outputs.package_name }}
-          draft: true
+          draft: false
